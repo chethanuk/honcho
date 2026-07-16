@@ -98,6 +98,32 @@ class SummaryType(Enum):
     LONG = "honcho_chat_summary_long"
 
 
+# Degeneration guard (#899). A model that loops until the output cap emits non-empty
+# text, so the empty-check in _create_summary can't catch it. distinct-4 is chosen over
+# zlib compression ratio because it is length-stable: measured 1.00 on clean prose from
+# 3.7k-30k chars, while zlib drifts 2.17 -> 2.50 and would cross Whisper's 2.4 threshold
+# on perfectly good long text. Most templated legitimate doc in this repo scores 0.71;
+# degenerate output scores 0.00. 0.35 sits ~2x below the legitimate floor.
+_DEGENERATE_NGRAM_N = 4
+_DEGENERATE_DISTINCT_RATIO = 0.35
+# Provider-native cap-hit spellings; never normalized upstream (src/llm/executor.py:299).
+_CAP_FINISH_REASONS = frozenset({"max_tokens", "length"})
+
+
+def _distinct_ngram_ratio(text: str, n: int = _DEGENERATE_NGRAM_N) -> float:
+    """Fraction of n-grams in `text` that are unique. 1.0 = no repetition."""
+    words = text.split()
+    if len(words) < n:
+        return 1.0
+    grams = [tuple(words[i : i + n]) for i in range(len(words) - n + 1)]
+    return len(set(grams)) / len(grams)
+
+
+def _hit_output_cap(finish_reasons: list[str]) -> bool:
+    """True when any provider reported stopping at the output-token cap."""
+    return any(r.lower() in _CAP_FINISH_REASONS for r in finish_reasons)
+
+
 def short_summary_prompt(
     formatted_messages: str,
     output_words: int,
@@ -623,6 +649,38 @@ async def _create_summary(
             summary_tokens = estimate_tokens(summary_text) if summary_text else 0
             llm_input_tokens = 0
             llm_output_tokens = 0
+        elif _hit_output_cap(response.finish_reasons):
+            repetition_ratio = _distinct_ngram_ratio(summary_text)
+            if repetition_ratio < _DEGENERATE_DISTINCT_RATIO:
+                logger.error(
+                    (
+                        "Generated %s summary is degenerate: hit the output cap "
+                        "(finish_reasons=%s) with a distinct-%d ratio of %.3f < %.2f. "
+                        "Discarding; the previous summary is retained."
+                    ),
+                    summary_type.name,
+                    response.finish_reasons,
+                    _DEGENERATE_NGRAM_N,
+                    repetition_ratio,
+                    _DEGENERATE_DISTINCT_RATIO,
+                )
+                is_fallback = True
+                summary_text = (
+                    (
+                        f"Conversation with {message_count} messages about "
+                        f"{last_message_content_preview}..."
+                    )
+                    if message_count > 0
+                    else ""
+                )
+                summary_tokens = estimate_tokens(summary_text) if summary_text else 0
+                llm_input_tokens = 0  # match the documented fallback contract
+                llm_output_tokens = 0
+                if settings.METRICS.ENABLED:
+                    prometheus_metrics.record_summary_rejection(
+                        summary_type=summary_type.name.lower(),
+                        reason="degenerate_repetition",
+                    )
     except Exception:
         logger.exception("Error generating summary!")
         # Fallback to a basic summary in case of error
