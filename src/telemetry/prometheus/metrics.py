@@ -286,7 +286,7 @@ class PrometheusMetrics:
                 summary_type=summary_type, reason=reason
             ).inc()
         except Exception as e:
-            logger.warning("Failed to record summary rejection metric: %s", e)
+            self._handle_metric_error("record_summary_rejection", e)
 
     def record_dialectic_tokens(
         self,

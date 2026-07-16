@@ -124,6 +124,18 @@ def _hit_output_cap(finish_reasons: list[str]) -> bool:
     return any(r.lower() in _CAP_FINISH_REASONS for r in finish_reasons)
 
 
+def _basic_fallback_summary(
+    message_count: int, last_message_content_preview: str
+) -> str:
+    """Deterministic one-liner used when the LLM summary is unusable."""
+    if message_count <= 0:
+        return ""
+    return (
+        f"Conversation with {message_count} messages about "
+        f"{last_message_content_preview}..."
+    )
+
+
 def short_summary_prompt(
     formatted_messages: str,
     output_words: int,
@@ -641,10 +653,8 @@ async def _create_summary(
                 response.finish_reasons,
             )
             is_fallback = True
-            summary_text = (
-                f"Conversation with {message_count} messages about {last_message_content_preview}..."
-                if message_count > 0
-                else ""
+            summary_text = _basic_fallback_summary(
+                message_count, last_message_content_preview
             )
             summary_tokens = estimate_tokens(summary_text) if summary_text else 0
             llm_input_tokens = 0
@@ -665,13 +675,8 @@ async def _create_summary(
                     _DEGENERATE_DISTINCT_RATIO,
                 )
                 is_fallback = True
-                summary_text = (
-                    (
-                        f"Conversation with {message_count} messages about "
-                        f"{last_message_content_preview}..."
-                    )
-                    if message_count > 0
-                    else ""
+                summary_text = _basic_fallback_summary(
+                    message_count, last_message_content_preview
                 )
                 summary_tokens = estimate_tokens(summary_text) if summary_text else 0
                 llm_input_tokens = 0  # match the documented fallback contract
@@ -684,10 +689,8 @@ async def _create_summary(
     except Exception:
         logger.exception("Error generating summary!")
         # Fallback to a basic summary in case of error
-        summary_text = (
-            f"Conversation with {message_count} messages about {last_message_content_preview}..."
-            if message_count > 0
-            else ""
+        summary_text = _basic_fallback_summary(
+            message_count, last_message_content_preview
         )
         summary_tokens = 0
         is_fallback = True
