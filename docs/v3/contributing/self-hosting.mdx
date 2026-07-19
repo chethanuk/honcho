@@ -270,7 +270,19 @@ If you get back a workspace object with an `id`, your database is connected and 
 
 ### 3. API Documentation
 
-Visit `http://localhost:8000/docs` to see the interactive API documentation.
+Visit `http://localhost:8000/docs` to see the interactive API documentation. If you mapped the API to
+a different host port or reach it over a hostname, use that origin instead — the docs page and its
+"Try it out" button always send requests to the origin you loaded `/docs` from.
+
+The one case that needs configuration is a reverse proxy that **strips a path prefix** before
+forwarding (e.g. the proxy serves `https://example.com/api/...` but Honcho receives `/...`). Tell the
+app about the prefix with `--root-path`, and it will advertise it in the schema:
+
+```bash
+fastapi run src/main.py --root-path /api
+```
+
+A proxy that forwards the path unchanged needs no `--root-path`.
 
 ### 4. Test with SDK
 

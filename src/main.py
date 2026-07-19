@@ -164,10 +164,9 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     lifespan=lifespan,
-    servers=[
-        {"url": "https://api.honcho.dev", "description": "Production SaaS Platform"},
-        {"url": "http://localhost:8000", "description": "Local Development Server"},
-    ],
+    # No `servers`: FastAPI then omits the OpenAPI `servers` key, so Swagger UI targets
+    # the origin /docs was served from -- correct for any self-hosted deployment. Behind a
+    # prefix-stripping proxy, run with --root-path; FastAPI advertises it automatically.
     title="Honcho API",
     summary="The Identity Layer for the Agentic World",
     description="""Honcho is a platform for giving agents user-centric memory and social cognition.""",
