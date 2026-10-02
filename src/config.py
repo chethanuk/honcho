@@ -746,6 +746,9 @@ class DBSettings(HonchoSettings):
     # deriver backs off and retries on a later poll).
     CONNECT_TIMEOUT_SECONDS: Annotated[int, Field(default=2, gt=0, le=60)] = 2
 
+    # Seconds a migrator waits for another migrator's advisory lock before failing
+    MIGRATION_LOCK_WAIT_SECONDS: Annotated[int, Field(default=300, gt=0, le=3600)] = 300
+
 
 class AuthSettings(HonchoSettings):
     model_config = SettingsConfigDict(env_prefix="AUTH_", extra="ignore")  # pyright: ignore
@@ -1439,12 +1442,14 @@ class DreamSettings(HonchoSettings):
 
 
 class VectorStoreSettings(HonchoSettings):
-    """Settings for vector store (pgvector, Turbopuffer, LanceDB or Qdrant)."""
+    """Settings for vector store (pgvector, Turbopuffer, LanceDB, Qdrant, or ChromaDB)."""
 
     model_config = SettingsConfigDict(env_prefix="VECTOR_STORE_", extra="ignore")  # pyright: ignore
 
     # Vector store type to use
-    TYPE: Literal["pgvector", "turbopuffer", "lancedb", "qdrant"] = "pgvector"
+    TYPE: Literal["pgvector", "turbopuffer", "lancedb", "qdrant", "chromadb"] = (
+        "pgvector"
+    )
 
     MIGRATED: bool = False
 
@@ -1479,15 +1484,54 @@ class VectorStoreSettings(HonchoSettings):
     QDRANT_PREFIX: str | None = None
     QDRANT_TIMEOUT: int | None = None
 
+    # ChromaDB-specific settings
+    # CHROMA_CLIENT_MODE selects the deployment shape:
+    # - "http": self-hosted Chroma server at CHROMA_HOST:CHROMA_PORT
+    # - "cloud": Chroma Cloud (requires CHROMA_API_KEY)
+    # Embedded persistence is unsafe across Honcho's API/worker processes.
+    CHROMA_CLIENT_MODE: Literal["http", "cloud"] = "http"
+    CHROMA_HOST: str = "localhost"
+    CHROMA_PORT: Annotated[int, Field(default=8000, gt=0)] = 8000
+    CHROMA_SSL: bool = False
+    CHROMA_API_KEY: str | None = None
+    # Tenant/database are optional for cloud mode (resolved from the API key
+    # when omitted); ignored in http mode.
+    CHROMA_TENANT: str | None = None
+    CHROMA_DATABASE: str | None = None
+
     RECONCILIATION_INTERVAL_SECONDS: Annotated[int, Field(default=300, gt=0)] = (
         300  # 5 minutes
     )
+
+    @field_validator("CHROMA_CLIENT_MODE", mode="before")
+    @classmethod
+    def _reject_embedded_chroma(cls, value: Any) -> Any:
+        if value == "persistent":
+            raise ValueError(
+                "ChromaDB persistent mode is unsafe across Honcho's multiple "
+                + "processes. Use VECTOR_STORE_CHROMA_CLIENT_MODE=http with a "
+                + "Chroma server, or cloud."
+            )
+        return value
 
     @model_validator(mode="after")
     def _require_api_key_for_turbopuffer(self) -> "VectorStoreSettings":
         if self.TYPE == "turbopuffer" and not self.TURBOPUFFER_API_KEY:
             raise ValueError(
                 "VECTOR_STORE_TURBOPUFFER_API_KEY must be set when TYPE is 'turbopuffer'"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_api_key_for_chroma_cloud(self) -> "VectorStoreSettings":
+        if (
+            self.TYPE == "chromadb"
+            and self.CHROMA_CLIENT_MODE == "cloud"
+            and not self.CHROMA_API_KEY
+        ):
+            raise ValueError(
+                "VECTOR_STORE_CHROMA_API_KEY must be set when TYPE is 'chromadb'"
+                + " and CHROMA_CLIENT_MODE is 'cloud'"
             )
         return self
 
@@ -1522,29 +1566,11 @@ class AppSettings(HonchoSettings):
     EMBED_MESSAGES: bool = True
     LANGFUSE_HOST: str | None = None
     LANGFUSE_PUBLIC_KEY: str | None = None
-    # How Langfuse traces are produced:
-    #   "exporter" (default) — Langfuse is a projection over the captured
-    #     CapturedLLMCall stream (LangfuseExporter), the same source of truth as
-    #     the CloudEvents trace stream.
-    #   "inline" — legacy live instrumentation (@observe + propagate_attributes
-    #     spans during execution). Kept one release for side-by-side validation.
-    LANGFUSE_EXPORTER_MODE: Literal["inline", "exporter"] = "exporter"
-
-    @property
-    def langfuse_inline_enabled(self) -> bool:
-        """True when the legacy inline Langfuse instrumentation is active
-        (keys configured + ``LANGFUSE_EXPORTER_MODE == "inline"``)."""
-        return (
-            bool(self.LANGFUSE_PUBLIC_KEY) and self.LANGFUSE_EXPORTER_MODE == "inline"
-        )
 
     @property
     def langfuse_exporter_enabled(self) -> bool:
-        """True when the Langfuse exporter (a projection over the captured call
-        stream) is active (keys configured + ``LANGFUSE_EXPORTER_MODE == "exporter"``)."""
-        return (
-            bool(self.LANGFUSE_PUBLIC_KEY) and self.LANGFUSE_EXPORTER_MODE == "exporter"
-        )
+        """True when Langfuse keys are configured."""
+        return bool(self.LANGFUSE_PUBLIC_KEY)
 
     # Origins allowed by the FastAPI CORSMiddleware
     CORS_ORIGINS: list[str] = [
